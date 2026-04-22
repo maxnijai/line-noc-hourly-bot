@@ -85,6 +85,49 @@ PROVINCE_NAMES = PROVINCE_NAMES_NOR1 + PROVINCE_NAMES_NOR2
 OWNER_RE = re.compile(r"TRUE-TH-BBT-(NOR[12])-([A-Z]+[0-9]*)-", re.IGNORECASE)
 
 
+PROVINCE_ALIASES: Dict[str, str] = {
+    "CMI": "เชียงใหม่",
+    "CMI1": "เชียงใหม่",
+    "CMI2": "เชียงใหม่",
+    "เชียงใหม่": "เชียงใหม่",
+    "CRI": "เชียงราย",
+    "เชียงราย": "เชียงราย",
+    "LPG": "ลำปาง",
+    "ลำปาง": "ลำปาง",
+    "LPN": "ลำพูน",
+    "ลำพูน": "ลำพูน",
+    "MHS": "แม่ฮ่องสอน",
+    "แม่ฮ่องสอน": "แม่ฮ่องสอน",
+    "NAN": "น่าน",
+    "น่าน": "น่าน",
+    "PHE": "แพร่",
+    "แพร่": "แพร่",
+    "PYO": "พะเยา",
+    "พะเยา": "พะเยา",
+    "KPP": "กำแพงเพชร",
+    "กำแพงเพชร": "กำแพงเพชร",
+    "PCB": "เพชรบูรณ์",
+    "เพชรบูรณ์": "เพชรบูรณ์",
+    "PCT": "พิจิตร",
+    "พิจิตร": "พิจิตร",
+    "PSN": "พิษณุโลก",
+    "พิษณุโลก": "พิษณุโลก",
+    "SKT": "สุโขทัย",
+    "สุโขทัย": "สุโขทัย",
+    "TAK": "ตาก",
+    "ตาก": "ตาก",
+    "UTR": "อุตรดิตถ์",
+    "อุตรดิตถ์": "อุตรดิตถ์",
+}
+
+
+def normalize_province_arg(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    return PROVINCE_ALIASES.get(raw.upper(), PROVINCE_ALIASES.get(raw, raw))
+
+
 # ---------- CONFIG HELPERS ----------
 def _load_line_targets() -> Dict[str, str]:
     raw = os.getenv("LINE_TARGETS_JSON", "").strip()
@@ -584,20 +627,37 @@ def debug_env():
 def test_push():
     if request.args.get("secret", "") != CRON_SECRET:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
+
     targets = _load_line_targets()
-    only = request.args.get("province", "").strip()
-    if only:
-        targets = {only: targets[only]} if only in targets else {}
+    requested = request.args.get("province", "").strip()
+    if requested:
+        normalized = normalize_province_arg(requested)
+        targets = {normalized: targets[normalized]} if normalized in targets else {}
+
     if not targets:
-        return jsonify({"ok": False, "error": "no targets"}), 400
+        return jsonify({
+            "ok": False,
+            "error": "no targets",
+            "requested": requested,
+            "normalized": normalize_province_arg(requested) if requested else "",
+            "available_targets": sorted(list(_load_line_targets().keys())),
+        }), 400
+
     result = {}
+    now_str = datetime.now(TZ).strftime('%H:%M:%S')
     for province, tid in targets.items():
         ok = push_line(tid, [{
             "type": "text",
-            "text": f"✅ ทดสอบ LINE NOC Bot\nห้อง: {province}\nเวลา: {datetime.now(TZ).strftime('%H:%M:%S')}",
+            "text": f"✅ ทดสอบ LINE NOC Bot\nห้อง: {province}\nเวลา: {now_str}",
         }])
         result[province] = ok
-    return jsonify({"ok": True, "result": result})
+
+    return jsonify({
+        "ok": True,
+        "requested": requested,
+        "normalized": normalize_province_arg(requested) if requested else "",
+        "result": result,
+    })
 
 
 @app.route("/reset-seen", methods=["POST"])
@@ -637,7 +697,7 @@ def webhook():
         log.info(f"[webhook] type={stype} id={sid} msg={msg!r}")
         if msg.strip().lower() == "/id" and ev.get("replyToken"):
             try:
-                requests.post(
+                r = requests.post(
                     "https://api.line.me/v2/bot/message/reply",
                     headers={
                         "Content-Type": "application/json",
@@ -652,6 +712,8 @@ def webhook():
                     },
                     timeout=10,
                 )
+                if r.status_code != 200:
+                    log.error(f"reply failed {r.status_code}: {r.text}")
             except Exception as e:
                 log.error(f"reply failed: {e}")
     return "OK", 200
