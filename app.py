@@ -556,6 +556,30 @@ def debug_state():
     })
 
 
+
+
+@app.route("/debug-secret", methods=["GET"])
+def debug_secret():
+    cron = os.getenv("CRON_SECRET", "")
+    return jsonify({
+        "cron_secret_loaded": cron,
+        "length": len(cron),
+        "has_line_token": bool(os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")),
+        "sheet_id_set": bool(os.getenv("SHEET_ID", "")),
+        "sheet_name": os.getenv("SHEET_NAME", ""),
+    })
+
+
+@app.route("/debug-env", methods=["GET"])
+def debug_env():
+    safe_env = {}
+    for k, v in os.environ.items():
+        if any(word in k for word in ["TOKEN", "SECRET", "KEY", "CREDS"]):
+            safe_env[k] = f"***{len(v)} chars***"
+        else:
+            safe_env[k] = v
+    return jsonify(safe_env)
+
 @app.route("/test-push", methods=["GET"])
 def test_push():
     if request.args.get("secret", "") != CRON_SECRET:
