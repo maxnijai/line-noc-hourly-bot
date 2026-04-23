@@ -1,6 +1,8 @@
+
 """
 Telegram NOC Ticket Notifier (Production Final)
-Summary mode, Google Sheet source, duplicate protection.
+- Based on uploaded app(37).py
+- Change: keep summary message, then send each ticket separately
 """
 import os, re, json, logging, requests, gspread
 from datetime import datetime, timedelta
@@ -70,6 +72,7 @@ REGION_TO_DEFAULTS = {
     "NOR1": {"เชียงใหม่","เชียงราย","ลำปาง","ลำพูน","แม่ฮ่องสอน","น่าน","แพร่","พะเยา"},
     "NOR2": {"กำแพงเพชร","เพชรบูรณ์","พิจิตร","พิษณุโลก","สุโขทัย","ตาก","อุตรดิตถ์"},
 }
+
 app = Flask(__name__)
 
 def _authorized(): return request.args.get("secret", "") == CRON_SECRET
@@ -255,28 +258,31 @@ def build_summary_message(province: str, region: str, tickets: List[dict]) -> st
     counts = {sev: 0 for sev in sev_order}
     for t in tickets: counts[t["_severity_norm"]] = counts.get(t["_severity_norm"], 0) + 1
     summary_line = " | ".join([f"{sev}:{counts[sev]}" for sev in sev_order if counts[sev] > 0]) or "-"
-    sorted_tickets = sorted(tickets, key=lambda x: (SEVERITY_PRIORITY.get(x["_severity_norm"], 999), x["_created_dt"]))
     lines = [
         "🔔 <b>แจ้งเตือน Ticket ใหม่</b>",
         f"📍 จังหวัด: <b>{tg_escape(province)}</b> ({tg_escape(region)})",
         f"⏰ เวลา: {tg_escape(now)}",
         f"🎫 รวม: <b>{total}</b> รายการ",
         f"📊 {tg_escape(summary_line)}",
-        "",
-        f"📌 <b>Top {min(TOP_TICKET_PREVIEW, len(sorted_tickets))} รายการแรก</b>",
     ]
-    for i, t in enumerate(sorted_tickets[:TOP_TICKET_PREVIEW], 1):
-        tid = tg_escape(str(t.get(COL_TICKET_ID, "-")).strip() or "-")
-        created = tg_escape(str(t.get(COL_CREATION, "-")).strip() or "-")
-        ci = tg_escape(shorten(t.get(COL_CINAME, "-"), 40))
-        subj = tg_escape(shorten(t.get(COL_SUBJECT, "-"), 70))
-        sev = t["_severity_norm"]; icon = severity_icon(sev)
-        lines.append(f"{i}. {icon} <b>{sev}</b> | <code>{tid}</code>")
-        lines.append(f"   🕒 {created}")
-        lines.append(f"   📍 {ci}")
-        lines.append(f"   📝 {subj}")
-    if len(sorted_tickets) > TOP_TICKET_PREVIEW:
-        lines += ["", f"… และอีก <b>{len(sorted_tickets)-TOP_TICKET_PREVIEW}</b> รายการ"]
+    return "\n".join(lines)[:4000]
+
+def build_ticket_message(t: dict, idx: int, total: int) -> str:
+    tid = tg_escape(str(t.get(COL_TICKET_ID, "-")).strip() or "-")
+    created = tg_escape(str(t.get(COL_CREATION, "-")).strip() or "-")
+    target = tg_escape(str(t.get(COL_TARGET_FINISH, "-")).strip() or "-")
+    ci = tg_escape(shorten(t.get(COL_CINAME, "-"), 50))
+    cat = tg_escape(shorten(t.get(COL_CATEGORIES, "-"), 50))
+    subj = tg_escape(shorten(t.get(COL_SUBJECT, "-"), 180))
+    sev = t["_severity_norm"]; icon = severity_icon(sev)
+    lines = [
+        f"{icon} <b>{idx}/{total}</b> | <b>{sev}</b> | <code>{tid}</code>",
+        f"🕒 {created}",
+        f"⏳ {target}",
+        f"📍 {ci}",
+        f"🗂 {cat}",
+        f"📝 {subj}",
+    ]
     return "\n".join(lines)[:4000]
 
 def push_telegram(chat_id: str, text: str) -> bool:
@@ -300,7 +306,7 @@ def run_job() -> dict:
     if max_insert_time is None:
         return {"ok": False, "error": f"cannot find valid {COL_INSERT_TIME}"}
     if last_insert_time and max_insert_time <= last_insert_time:
-        return {"ok": True, "mode": "insert_then_creation_summary_telegram", "new_batch": False, "new": 0, "message": "insert_time not changed", "last_insert_time": last_insert_time.isoformat(), "current_max_insert_time": max_insert_time.isoformat(), "last_creation_time": last_creation_time.isoformat() if last_creation_time else None, "pushed": {}}
+        return {"ok": True, "mode": "insert_then_creation_summary_plus_each_telegram", "new_batch": False, "new": 0, "message": "insert_time not changed", "last_insert_time": last_insert_time.isoformat(), "current_max_insert_time": max_insert_time.isoformat(), "last_creation_time": last_creation_time.isoformat() if last_creation_time else None, "pushed": {}}
     new_tickets, max_creation_time = filter_new_tickets(rows, seen, last_creation_time)
     detail = {}; pushed_ids = []
     if new_tickets:
@@ -310,22 +316,27 @@ def run_job() -> dict:
             if not target:
                 detail[province] = {"count": len(lst), "pushed": False, "reason": "no target configured"}; continue
             region = lst[0]["_region"]
-            ok = push_telegram(target, build_summary_message(province, region, lst))
-            detail[province] = {"count": len(lst), "pushed": ok}
-            if ok: pushed_ids.extend([t["_ticket_id"] for t in lst])
+            ok_summary = push_telegram(target, build_summary_message(province, region, lst))
+            ok_all = ok_summary
+            sorted_tickets = sorted(lst, key=lambda x: (SEVERITY_PRIORITY.get(x["_severity_norm"], 999), x["_created_dt"]))
+            for idx, t in enumerate(sorted_tickets, 1):
+                ok_one = push_telegram(target, build_ticket_message(t, idx, len(sorted_tickets)))
+                ok_all = ok_all and ok_one
+            detail[province] = {"count": len(lst), "pushed": ok_all}
+            if ok_summary: pushed_ids.extend([t["_ticket_id"] for t in lst])
         if pushed_ids: save_seen(pushed_ids)
     save_last_batch_state(max_insert_time, max_creation_time if max_creation_time else last_creation_time)
     final_last_creation = max_creation_time if max_creation_time else last_creation_time
-    return {"ok": True, "mode": "insert_then_creation_summary_telegram", "new_batch": True, "new": len(new_tickets), "pushed_count": len(pushed_ids), "last_insert_time": max_insert_time.isoformat(), "last_creation_time": final_last_creation.isoformat() if final_last_creation else None, "allowed_severities": sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)), "detail": detail}
+    return {"ok": True, "mode": "insert_then_creation_summary_plus_each_telegram", "new_batch": True, "new": len(new_tickets), "pushed_count": len(set(pushed_ids)), "last_insert_time": max_insert_time.isoformat(), "last_creation_time": final_last_creation.isoformat() if final_last_creation else None, "allowed_severities": sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)), "detail": detail}
 
 @app.route("/")
 def home():
-    return jsonify({"service":"Telegram NOC Ticket Notifier","status":"running","mode":"insert_then_creation_summary_telegram","time":datetime.now(TZ).isoformat(),"summary_mode":True,"top_ticket_preview":TOP_TICKET_PREVIEW})
+    return jsonify({"service":"Telegram NOC Ticket Notifier","status":"running","mode":"insert_then_creation_summary_plus_each_telegram","time":datetime.now(TZ).isoformat(),"summary_mode":True,"each_ticket_mode":True})
 
 @app.route("/health")
 def health():
     targets = _load_targets(); seen = load_seen(); last_insert_time, last_creation_time = load_last_batch_state()
-    return jsonify({"ok":True,"seen_count":len(seen),"has_telegram_token":bool(TELEGRAM_BOT_TOKEN),"has_sheet_creds":bool(GOOGLE_CREDS_JSON),"sheet_id_set":bool(SHEET_ID),"sheet_name":SHEET_NAME,"insert_time_column":COL_INSERT_TIME,"creation_column":COL_CREATION,"owner_column":COL_OWNER_GROUP,"region_column":COL_REGION,"province_column":COL_PROVINCE,"owner_group_fallback_index":OWNER_GROUP_FALLBACK_INDEX,"allowed_severities":sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)),"targets_configured":len(targets),"targets_missing":[p for p in PROVINCE_NAMES if p not in targets],"last_insert_time":last_insert_time.isoformat() if last_insert_time else None,"last_creation_time":last_creation_time.isoformat() if last_creation_time else None,"summary_mode":True,"top_ticket_preview":TOP_TICKET_PREVIEW})
+    return jsonify({"ok":True,"seen_count":len(seen),"has_telegram_token":bool(TELEGRAM_BOT_TOKEN),"has_sheet_creds":bool(GOOGLE_CREDS_JSON),"sheet_id_set":bool(SHEET_ID),"sheet_name":SHEET_NAME,"insert_time_column":COL_INSERT_TIME,"creation_column":COL_CREATION,"owner_column":COL_OWNER_GROUP,"region_column":COL_REGION,"province_column":COL_PROVINCE,"owner_group_fallback_index":OWNER_GROUP_FALLBACK_INDEX,"allowed_severities":sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)),"targets_configured":len(targets),"targets_missing":[p for p in PROVINCE_NAMES if p not in targets],"last_insert_time":last_insert_time.isoformat() if last_insert_time else None,"last_creation_time":last_creation_time.isoformat() if last_creation_time else None,"summary_mode":True,"each_ticket_mode":True})
 
 @app.route("/run-by-insert-time", methods=["GET","POST"])
 def run_by_insert_time():
