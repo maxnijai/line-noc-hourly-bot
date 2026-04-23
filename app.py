@@ -603,6 +603,8 @@ def debug_state():
 
 @app.route("/debug-secret", methods=["GET"])
 def debug_secret():
+    if request.args.get("secret", "") != CRON_SECRET:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     cron = os.getenv("CRON_SECRET", "")
     return jsonify({
         "cron_secret_loaded": cron,
@@ -615,6 +617,8 @@ def debug_secret():
 
 @app.route("/debug-env", methods=["GET"])
 def debug_env():
+    if request.args.get("secret", "") != CRON_SECRET:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     safe_env = {}
     for k, v in os.environ.items():
         if any(word in k for word in ["TOKEN", "SECRET", "KEY", "CREDS"]):
@@ -660,7 +664,7 @@ def test_push():
     })
 
 
-@app.route("/reset-seen", methods=["POST"])
+@app.route("/reset-seen", methods=["GET", "POST"])
 def reset_seen():
     if request.args.get("secret", "") != CRON_SECRET:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
@@ -672,7 +676,7 @@ def reset_seen():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/reset-state", methods=["POST"])
+@app.route("/reset-state", methods=["GET", "POST"])
 def reset_state():
     if request.args.get("secret", "") != CRON_SECRET:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
