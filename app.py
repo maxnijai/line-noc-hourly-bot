@@ -7,6 +7,8 @@ Logic:
 2) ถ้า batch ใหม่เข้ามา ค่อยคัด ticket ด้วย CREATIONDATE ที่ใหม่กว่ารอบก่อน
 3) กันส่งซ้ำด้วย seen_tickets.json
 4) อ่าน owner group โดยพยายามใช้ชื่อคอลัมน์ก่อน และ fallback เป็น column index M
+5) แจ้งเฉพาะ severity ที่ต้องการ:
+   SA1 SA2 SA3 SA4 NSA1 NSA2 NSA3 NSA4
 """
 
 import os
@@ -22,11 +24,7 @@ from google.oauth2.service_account import Credentials
 from flask import Flask, request, jsonify
 import requests
 
-# ---------- CONFIG ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 TZ = ZoneInfo("Asia/Bangkok")
@@ -53,11 +51,22 @@ COL_LONGITUDE = os.getenv("COL_LONGITUDE", "LONGITUDE")
 STATE_DIR = os.getenv("STATE_DIR", "/data")
 STATE_FILE = os.path.join(STATE_DIR, "seen_tickets.json")
 LAST_BATCH_FILE = os.path.join(STATE_DIR, "last_batch_state.json")
-
-# column M = index 12 (0-based) in the sheet screenshot
 OWNER_GROUP_FALLBACK_INDEX = int(os.getenv("OWNER_GROUP_FALLBACK_INDEX", "12"))
 
-# ---------- PROVINCE CONFIG ----------
+ALLOWED_SEVERITIES = {
+    "SA1", "SA2", "SA3", "SA4",
+    "NSA1", "NSA2", "NSA3", "NSA4",
+}
+
+SEVERITY_PRIORITY = {
+    "SA1": 1, "NSA1": 2,
+    "SA2": 3, "NSA2": 4,
+    "SA3": 5, "NSA3": 6,
+    "SA4": 7, "NSA4": 8,
+    "SA5": 9, "NSA5": 10,
+    "SA6": 11, "NSA6": 12,
+}
+
 CODE_TO_PROVINCE: Dict[str, Tuple[str, str]] = {
     "CMI": ("เชียงใหม่", "NOR1"),
     "CMI1": ("เชียงใหม่", "NOR1"),
@@ -109,22 +118,10 @@ PROVINCE_TO_ENV = {
     "อุตรดิตถ์": "LINE_TARGET_UTR",
 }
 
-CODE_TO_PROVINCE_ONLY = {
-    "CMI": "เชียงใหม่", "CMI1": "เชียงใหม่", "CMI2": "เชียงใหม่",
-    "CRI": "เชียงราย", "LPG": "ลำปาง", "LPN": "ลำพูน", "MHS": "แม่ฮ่องสอน",
-    "NAN": "น่าน", "PHE": "แพร่", "PRE": "แพร่", "PYO": "พะเยา",
-    "KPP": "กำแพงเพชร", "PCB": "เพชรบูรณ์", "PBN": "เพชรบูรณ์",
-    "PCT": "พิจิตร", "PSN": "พิษณุโลก", "PHS": "พิษณุโลก", "PLK": "พิษณุโลก",
-    "SKT": "สุโขทัย", "STI": "สุโขทัย", "TAK": "ตาก", "UTR": "อุตรดิตถ์", "UTT": "อุตรดิตถ์",
-}
-PROVINCE_TO_CODES = {}
-for code, province in CODE_TO_PROVINCE_ONLY.items():
-    PROVINCE_TO_CODES.setdefault(province, set()).add(code)
+CODE_TO_PROVINCE_ONLY = {k: v[0] for k, v in CODE_TO_PROVINCE.items()}
 
 OWNER_RE = re.compile(r"TRUE-TH-BBT-(NOR[12])-([A-Z]+[0-9]*)-", re.IGNORECASE)
 
-
-# ---------- CONFIG HELPERS ----------
 def _load_line_targets() -> Dict[str, str]:
     raw = os.getenv("LINE_TARGETS_JSON", "").strip()
     if raw:
@@ -141,11 +138,8 @@ def _load_line_targets() -> Dict[str, str]:
             out[province] = val
     return out
 
-
-# ---------- STATE ----------
 def _ensure_state_dir() -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
-
 
 def load_seen() -> Set[str]:
     try:
@@ -159,7 +153,6 @@ def load_seen() -> Set[str]:
     except Exception as e:
         log.error(f"load_seen failed: {e}")
         return set()
-
 
 def save_seen(new_ids: List[str]) -> None:
     try:
@@ -178,7 +171,6 @@ def save_seen(new_ids: List[str]) -> None:
     except Exception as e:
         log.error(f"save_seen failed: {e}")
 
-
 def load_last_batch_state() -> Tuple[Optional[datetime], Optional[datetime]]:
     try:
         _ensure_state_dir()
@@ -196,7 +188,6 @@ def load_last_batch_state() -> Tuple[Optional[datetime], Optional[datetime]]:
         log.error(f"load_last_batch_state failed: {e}")
         return None, None
 
-
 def save_last_batch_state(last_insert_time: Optional[datetime], last_creation_time: Optional[datetime]) -> None:
     try:
         _ensure_state_dir()
@@ -210,8 +201,6 @@ def save_last_batch_state(last_insert_time: Optional[datetime], last_creation_ti
     except Exception as e:
         log.error(f"save_last_batch_state failed: {e}")
 
-
-# ---------- GOOGLE SHEET ----------
 def fetch_tickets() -> List[dict]:
     if not GOOGLE_CREDS_JSON:
         raise RuntimeError("GOOGLE_CREDS_JSON env var not set")
@@ -231,8 +220,6 @@ def fetch_tickets() -> List[dict]:
     log.info(f"fetched {len(records)} rows")
     return records
 
-
-# ---------- PARSING ----------
 def parse_datetime(val) -> Optional[datetime]:
     if val is None:
         return None
@@ -267,20 +254,21 @@ def parse_datetime(val) -> Optional[datetime]:
     except ValueError:
         return None
 
+def normalize_severity(val) -> str:
+    if val is None:
+        return ""
+    return str(val).strip().upper()
 
 def safe_get_owner(row: dict) -> str:
-    # 1) try exact env column
     value = row.get(COL_OWNER_GROUP)
     if value not in (None, ""):
         return str(value).strip()
 
-    # 2) try common variants
     for key in ["TRUEOWNERGROUP", "TRUEOWNERGROUP ", "TRUE OWNER GROUP", "trueownnergroup", "TRUEOWNNERGROUP"]:
         value = row.get(key)
         if value not in (None, ""):
             return str(value).strip()
 
-    # 3) fallback to fixed column index (M = 12)
     try:
         values = list(row.values())
         if OWNER_GROUP_FALLBACK_INDEX < len(values):
@@ -290,7 +278,6 @@ def safe_get_owner(row: dict) -> str:
         pass
 
     return ""
-
 
 def parse_owner_group(val: str) -> Tuple[Optional[str], Optional[str]]:
     if not val:
@@ -304,13 +291,11 @@ def parse_owner_group(val: str) -> Tuple[Optional[str], Optional[str]]:
         if code in CODE_TO_PROVINCE:
             return CODE_TO_PROVINCE[code]
 
-    # fallback by code contains
     for code, (province, region) in CODE_TO_PROVINCE.items():
         if code in text:
             return province, region
 
     return None, None
-
 
 def normalize_requested_province(raw: str) -> Optional[str]:
     if not raw:
@@ -323,8 +308,6 @@ def normalize_requested_province(raw: str) -> Optional[str]:
         return CODE_TO_PROVINCE_ONLY[upper]
     return None
 
-
-# ---------- FILTERING ----------
 def get_max_insert_time(rows: List[dict]) -> Optional[datetime]:
     max_insert: Optional[datetime] = None
     for row in rows:
@@ -335,12 +318,7 @@ def get_max_insert_time(rows: List[dict]) -> Optional[datetime]:
             max_insert = ins
     return max_insert
 
-
-def filter_new_tickets_for_new_batch(
-    rows: List[dict],
-    seen: Set[str],
-    last_creation_time: Optional[datetime],
-) -> Tuple[List[dict], Optional[datetime]]:
+def filter_new_tickets_for_new_batch(rows: List[dict], seen: Set[str], last_creation_time: Optional[datetime]) -> Tuple[List[dict], Optional[datetime]]:
     result = []
     seen_in_batch: Set[str] = set()
     max_creation: Optional[datetime] = last_creation_time
@@ -348,6 +326,10 @@ def filter_new_tickets_for_new_batch(
     for row in rows:
         tid = str(row.get(COL_TICKET_ID, "")).strip()
         if not tid or tid in seen or tid in seen_in_batch:
+            continue
+
+        severity = normalize_severity(row.get(COL_SEVERITY, ""))
+        if severity not in ALLOWED_SEVERITIES:
             continue
 
         owner = safe_get_owner(row)
@@ -367,6 +349,7 @@ def filter_new_tickets_for_new_batch(
         row["_province"] = province
         row["_region"] = region
         row["_created_dt"] = created
+        row["_severity_norm"] = severity
         result.append(row)
         seen_in_batch.add(tid)
 
@@ -375,15 +358,30 @@ def filter_new_tickets_for_new_batch(
 
     return result, max_creation
 
-
 def group_by_province(tickets: List[dict]) -> Dict[str, List[dict]]:
     buckets: Dict[str, List[dict]] = {p: [] for p in PROVINCE_NAMES}
     for t in tickets:
         buckets[t["_province"]].append(t)
     return {p: v for p, v in buckets.items() if v}
 
+def severity_icon(sev: str) -> str:
+    sev = normalize_severity(sev)
+    if sev in {"SA1", "NSA1"}:
+        return "🚨"
+    if sev in {"SA2", "NSA2"}:
+        return "🔴"
+    if sev in {"SA3", "NSA3"}:
+        return "🟠"
+    if sev in {"SA4", "NSA4"}:
+        return "🟡"
+    return "📌"
 
-# ---------- MESSAGE FORMAT ----------
+def shorten(text: str, limit: int = 220) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text or "-"
+    return text[:limit - 3] + "..."
+
 def format_ticket_text(t: dict, index: int, total: int) -> str:
     def g(key: str) -> str:
         v = t.get(key, "")
@@ -400,35 +398,54 @@ def format_ticket_text(t: dict, index: int, total: int) -> str:
         except ValueError:
             pass
 
-    severity = g(COL_SEVERITY)
-    header = f"📌 {index}/{total} | {severity}"
+    sev = t.get("_severity_norm", normalize_severity(g(COL_SEVERITY)))
+    icon = severity_icon(sev)
 
-    return (
-        f"{header}\n"
-        f"TICKETID\n{g(COL_TICKET_ID)}\n"
-        f"CREATIONDATE\n{g(COL_CREATION)}\n"
-        f"INSERT_TIME\n{g(COL_INSERT_TIME)}\n"
-        f"TARGETFINISH\n{g(COL_TARGET_FINISH)}\n"
-        f"SEVERITY\n{severity}\n"
-        f"SUBJECT\n{g(COL_SUBJECT)}\n"
-        f"CINAME\n{g(COL_CINAME)}\n"
-        f"CATEGORIES\n{g(COL_CATEGORIES)}\n"
-        f"OWNERGROUP\n{t.get('_owner_raw', safe_get_owner(t)) or '-'}\n"
-        f"LATITUDE\n{lat}\n"
-        f"LONGITUDE\n{lon}"
-        f"{maps_line}"
-    )
+    ci = shorten(g(COL_CINAME), 60)
+    cat = shorten(g(COL_CATEGORIES), 60)
+    subj = shorten(g(COL_SUBJECT), 260)
 
+    lines = [
+        f"{icon} {index}/{total} | {sev}",
+        f"🎫 {g(COL_TICKET_ID)}",
+        f"🕒 Create: {g(COL_CREATION)}",
+        f"⏳ Target: {g(COL_TARGET_FINISH)}",
+        f"📍 Site: {ci}",
+        f"🗂 {cat}",
+        f"📝 {subj}",
+        f"🏷 Owner: {t.get('_owner_raw', safe_get_owner(t)) or '-'}",
+    ]
+    if maps_line:
+        lines.append(maps_line.strip())
+    return "\n".join(lines)
 
 def build_messages_for_province(province: str, region: str, tickets: List[dict]) -> List[dict]:
     now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
     total = len(tickets)
+
+    counts = {sev: 0 for sev in sorted(ALLOWED_SEVERITIES, key=lambda s: SEVERITY_PRIORITY.get(s, 999))}
+    for t in tickets:
+        sev = t.get("_severity_norm", normalize_severity(t.get(COL_SEVERITY, "")))
+        counts[sev] = counts.get(sev, 0) + 1
+
+    count_parts = [f"{sev}:{cnt}" for sev, cnt in counts.items() if cnt > 0]
+    severity_summary = " | ".join(count_parts) if count_parts else "-"
+
     header = (
-        f"🔔 Ticket ใหม่ — {province} ({region})\n"
-        f"⏰ {now}  |  🎫 {total} รายการ"
+        f"🔔 Ticket ใหม่ {province} ({region})\n"
+        f"⏰ {now}\n"
+        f"🎫 รวม {total} รายการ\n"
+        f"📊 {severity_summary}"
     )
+
     msgs = [{"type": "text", "text": header}]
-    sorted_tickets = sorted(tickets, key=lambda x: x.get("_created_dt", datetime.min.replace(tzinfo=TZ)))
+    sorted_tickets = sorted(
+        tickets,
+        key=lambda x: (
+            SEVERITY_PRIORITY.get(x.get("_severity_norm", normalize_severity(x.get(COL_SEVERITY, ""))), 999),
+            x.get("_created_dt", datetime.min.replace(tzinfo=TZ))
+        )
+    )
     for i, t in enumerate(sorted_tickets, 1):
         txt = format_ticket_text(t, i, total)
         if len(txt) > 4900:
@@ -436,8 +453,6 @@ def build_messages_for_province(province: str, region: str, tickets: List[dict])
         msgs.append({"type": "text", "text": txt})
     return msgs
 
-
-# ---------- LINE PUSH ----------
 def push_line(target_id: str, messages: List[dict]) -> bool:
     if not LINE_CHANNEL_ACCESS_TOKEN:
         log.error("LINE_CHANNEL_ACCESS_TOKEN missing")
@@ -456,12 +471,7 @@ def push_line(target_id: str, messages: List[dict]) -> bool:
     for i in range(0, len(messages), 5):
         batch = messages[i:i + 5]
         try:
-            r = requests.post(
-                url,
-                headers=headers,
-                json={"to": target_id, "messages": batch},
-                timeout=15,
-            )
+            r = requests.post(url, headers=headers, json={"to": target_id, "messages": batch}, timeout=15)
             if r.status_code == 200:
                 log.info(f"push ok → {target_id[:10]}... ({len(batch)} msgs)")
             else:
@@ -472,8 +482,6 @@ def push_line(target_id: str, messages: List[dict]) -> bool:
             ok_all = False
     return ok_all
 
-
-# ---------- MAIN JOB ----------
 def run_insert_creation_job() -> dict:
     log.info("=== insert+creation job start ===")
     targets = _load_line_targets()
@@ -505,12 +513,8 @@ def run_insert_creation_job() -> dict:
             "pushed": {},
         }
 
-    new_tickets, max_creation_time = filter_new_tickets_for_new_batch(
-        rows=rows,
-        seen=seen,
-        last_creation_time=last_creation_time,
-    )
-    log.info(f"new batch detected, new tickets by CREATIONDATE: {len(new_tickets)}")
+    new_tickets, max_creation_time = filter_new_tickets_for_new_batch(rows, seen, last_creation_time)
+    log.info(f"new batch detected, new tickets by CREATIONDATE+SEVERITY: {len(new_tickets)}")
 
     detail: Dict[str, dict] = {}
     pushed_ids: List[str] = []
@@ -521,11 +525,7 @@ def run_insert_creation_job() -> dict:
             target = targets.get(province)
             if not target:
                 log.warning(f"no LINE target for {province} → skip {len(lst)} tickets")
-                detail[province] = {
-                    "count": len(lst),
-                    "pushed": False,
-                    "reason": "no target configured",
-                }
+                detail[province] = {"count": len(lst), "pushed": False, "reason": "no target configured"}
                 continue
 
             region = lst[0]["_region"]
@@ -549,17 +549,14 @@ def run_insert_creation_job() -> dict:
         "pushed_count": len(pushed_ids),
         "last_insert_time": max_insert_time.isoformat(),
         "last_creation_time": new_last_creation.isoformat() if new_last_creation else None,
+        "allowed_severities": sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)),
         "detail": detail,
     }
 
-
-# ---------- FLASK ----------
 app = Flask(__name__)
-
 
 def _authorized() -> bool:
     return request.args.get("secret", "") == CRON_SECRET
-
 
 @app.route("/")
 def home():
@@ -568,8 +565,8 @@ def home():
         "status": "running",
         "mode": "insert_then_creation",
         "time": datetime.now(TZ).isoformat(),
+        "allowed_severities": sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)),
     })
-
 
 @app.route("/health")
 def health():
@@ -587,12 +584,12 @@ def health():
         "creation_column": COL_CREATION,
         "owner_column": COL_OWNER_GROUP,
         "owner_group_fallback_index": OWNER_GROUP_FALLBACK_INDEX,
+        "allowed_severities": sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)),
         "targets_configured": len(targets),
         "targets_missing": [p for p in PROVINCE_NAMES if p not in targets],
         "last_insert_time": last_insert_time.isoformat() if last_insert_time else None,
         "last_creation_time": last_creation_time.isoformat() if last_creation_time else None,
     })
-
 
 @app.route("/run", methods=["GET", "POST"])
 def run_endpoint():
@@ -600,13 +597,11 @@ def run_endpoint():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     return jsonify(run_insert_creation_job())
 
-
 @app.route("/run-by-insert-time", methods=["GET", "POST"])
 def run_by_insert_time():
     if not _authorized():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     return jsonify(run_insert_creation_job())
-
 
 @app.route("/debug-state", methods=["GET"])
 def debug_state():
@@ -619,7 +614,6 @@ def debug_state():
         "last_creation_time": last_creation_time.isoformat() if last_creation_time else None,
         "seen_count": len(load_seen()),
     })
-
 
 @app.route("/debug-secret", methods=["GET"])
 def debug_secret():
@@ -634,7 +628,6 @@ def debug_secret():
         "sheet_name": os.getenv("SHEET_NAME", ""),
     })
 
-
 @app.route("/debug-env", methods=["GET"])
 def debug_env():
     if not _authorized():
@@ -647,7 +640,6 @@ def debug_env():
             safe_env[k] = v
     return jsonify(safe_env)
 
-
 @app.route("/debug-last-rows", methods=["GET"])
 def debug_last_rows():
     if not _authorized():
@@ -659,10 +651,14 @@ def debug_last_rows():
     for row in rows:
         owner = safe_get_owner(row)
         province, region = parse_owner_group(owner)
+        sev = normalize_severity(row.get(COL_SEVERITY, ""))
         out.append({
             "TICKETID": row.get(COL_TICKET_ID, ""),
             "CREATIONDATE": row.get(COL_CREATION, ""),
             "insert_time": row.get(COL_INSERT_TIME, ""),
+            "SEVERITY": row.get(COL_SEVERITY, ""),
+            "severity_normalized": sev,
+            "severity_allowed": sev in ALLOWED_SEVERITIES,
             "TRUEOWNERGROUP": owner,
             "creation_parsed": parse_datetime(row.get(COL_CREATION, "")).isoformat() if parse_datetime(row.get(COL_CREATION, "")) else None,
             "insert_parsed": parse_datetime(row.get(COL_INSERT_TIME, "")).isoformat() if parse_datetime(row.get(COL_INSERT_TIME, "")) else None,
@@ -671,12 +667,10 @@ def debug_last_rows():
         })
     return jsonify({"ok": True, "count": len(out), "rows": out})
 
-
 @app.route("/test-push", methods=["GET"])
 def test_push():
     if not _authorized():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-
     targets = _load_line_targets()
     only_raw = request.args.get("province", "").strip()
     requested = only_raw
@@ -705,7 +699,6 @@ def test_push():
         result[province] = ok
     return jsonify({"ok": True, "requested": requested, "normalized": normalized, "result": result})
 
-
 @app.route("/reset-seen", methods=["GET", "POST"])
 def reset_seen():
     if not _authorized():
@@ -716,7 +709,6 @@ def reset_seen():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-
 
 @app.route("/reset-state", methods=["GET", "POST"])
 def reset_state():
@@ -730,7 +722,6 @@ def reset_state():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -751,10 +742,7 @@ def webhook():
                     },
                     json={
                         "replyToken": ev["replyToken"],
-                        "messages": [{
-                            "type": "text",
-                            "text": f"type: {stype}\nid: {sid}",
-                        }],
+                        "messages": [{"type": "text", "text": f"type: {stype}\nid: {sid}"}],
                     },
                     timeout=10,
                 )
@@ -763,7 +751,6 @@ def webhook():
             except Exception as e:
                 log.error(f"reply exception: {e}")
     return "OK", 200
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
