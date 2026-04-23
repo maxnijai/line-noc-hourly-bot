@@ -1,7 +1,16 @@
+
 """
-Telegram NOC Ticket Notifier (Production Final)
-Summary mode, Google Sheet source, duplicate protection.
+Telegram NOC Ticket Notifier (Summary + Each Ticket)
+- Google Sheet source
+- New batch detection by max(insert_time)
+- New ticket filter by CREATIONDATE > last_creation_time
+- Duplicate protection with seen_tickets.json
+- Sends:
+  1) one summary message per province per batch
+  2) then one message per ticket
+- Allowed severities: SA1 SA2 SA3 SA4 NSA1 NSA2 NSA3 NSA4
 """
+
 import os, re, json, logging, requests, gspread
 from datetime import datetime, timedelta
 from typing import Dict, List, Set, Tuple, Optional
@@ -31,9 +40,9 @@ COL_CINAME = os.getenv("COL_CINAME", "CINAME")
 COL_CATEGORIES = os.getenv("COL_CATEGORIES", "CATEGORIES")
 COL_REGION = os.getenv("COL_REGION", "Region")
 COL_PROVINCE = os.getenv("COL_PROVINCE", "Province")
-OWNER_GROUP_FALLBACK_INDEX = int(os.getenv("OWNER_GROUP_FALLBACK_INDEX", "12"))
-TOP_TICKET_PREVIEW = int(os.getenv("TOP_TICKET_PREVIEW", "5"))
+COL_OVER_SLA = os.getenv("COL_OVER_SLA", "OVER_SLA_Day")
 
+OWNER_GROUP_FALLBACK_INDEX = int(os.getenv("OWNER_GROUP_FALLBACK_INDEX", "12"))
 STATE_DIR = os.getenv("STATE_DIR", "/data")
 STATE_FILE = os.path.join(STATE_DIR, "seen_tickets.json")
 LAST_BATCH_FILE = os.path.join(STATE_DIR, "last_batch_state.json")
@@ -70,56 +79,74 @@ REGION_TO_DEFAULTS = {
     "NOR1": {"เชียงใหม่","เชียงราย","ลำปาง","ลำพูน","แม่ฮ่องสอน","น่าน","แพร่","พะเยา"},
     "NOR2": {"กำแพงเพชร","เพชรบูรณ์","พิจิตร","พิษณุโลก","สุโขทัย","ตาก","อุตรดิตถ์"},
 }
+
 app = Flask(__name__)
 
-def _authorized(): return request.args.get("secret", "") == CRON_SECRET
-def _ensure_state_dir(): os.makedirs(STATE_DIR, exist_ok=True)
+def _authorized():
+    return request.args.get("secret", "") == CRON_SECRET
+
+def _ensure_state_dir():
+    os.makedirs(STATE_DIR, exist_ok=True)
 
 def _load_targets() -> Dict[str, str]:
     out = {}
     raw = os.getenv("TELEGRAM_TARGETS_JSON", "").strip()
     if raw:
         try:
-            d = json.loads(raw); return {k: str(v).strip() for k, v in d.items() if str(v).strip()}
+            d = json.loads(raw)
+            return {k: str(v).strip() for k, v in d.items() if str(v).strip()}
         except Exception as e:
             log.error(f"TELEGRAM_TARGETS_JSON invalid: {e}")
     for province, env_name in PROVINCE_TO_ENV.items():
         val = os.getenv(env_name, "").strip()
-        if val: out[province] = val
+        if val:
+            out[province] = val
     return out
 
 def load_seen() -> Set[str]:
     try:
         _ensure_state_dir()
-        if not os.path.exists(STATE_FILE): return set()
-        with open(STATE_FILE, "r", encoding="utf-8") as f: data = json.load(f)
+        if not os.path.exists(STATE_FILE):
+            return set()
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
         cutoff = (datetime.now(TZ) - timedelta(days=7)).isoformat()
         return {k for k, v in data.items() if v >= cutoff}
     except Exception as e:
-        log.error(f"load_seen failed: {e}"); return set()
+        log.error(f"load_seen failed: {e}")
+        return set()
 
 def save_seen(ticket_ids: List[str]):
     try:
-        _ensure_state_dir(); data = {}
+        _ensure_state_dir()
+        data = {}
         if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r", encoding="utf-8") as f: data = json.load(f)
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
         now_iso = datetime.now(TZ).isoformat()
-        for tid in ticket_ids: data[tid] = now_iso
+        for tid in ticket_ids:
+            data[tid] = now_iso
         cutoff = (datetime.now(TZ) - timedelta(days=7)).isoformat()
         data = {k: v for k, v in data.items() if v >= cutoff}
-        with open(STATE_FILE, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"save_seen failed: {e}")
 
 def load_last_batch_state() -> Tuple[Optional[datetime], Optional[datetime]]:
     try:
         _ensure_state_dir()
-        if not os.path.exists(LAST_BATCH_FILE): return None, None
-        with open(LAST_BATCH_FILE, "r", encoding="utf-8") as f: data = json.load(f)
-        return (datetime.fromisoformat(data["last_insert_time"]) if data.get("last_insert_time") else None,
-                datetime.fromisoformat(data["last_creation_time"]) if data.get("last_creation_time") else None)
+        if not os.path.exists(LAST_BATCH_FILE):
+            return None, None
+        with open(LAST_BATCH_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return (
+            datetime.fromisoformat(data["last_insert_time"]) if data.get("last_insert_time") else None,
+            datetime.fromisoformat(data["last_creation_time"]) if data.get("last_creation_time") else None,
+        )
     except Exception as e:
-        log.error(f"load_last_batch_state failed: {e}"); return None, None
+        log.error(f"load_last_batch_state failed: {e}")
+        return None, None
 
 def save_last_batch_state(last_insert_time: Optional[datetime], last_creation_time: Optional[datetime]):
     try:
@@ -134,8 +161,6 @@ def save_last_batch_state(last_insert_time: Optional[datetime], last_creation_ti
         log.error(f"save_last_batch_state failed: {e}")
 
 def fetch_tickets() -> List[dict]:
-    if not GOOGLE_CREDS_JSON: raise RuntimeError("GOOGLE_CREDS_JSON env var not set")
-    if not SHEET_ID: raise RuntimeError("SHEET_ID env var not set")
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly","https://www.googleapis.com/auth/drive.readonly"]
     info = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(info, scopes=scopes)
@@ -143,13 +168,18 @@ def fetch_tickets() -> List[dict]:
     return gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME).get_all_records()
 
 def parse_datetime(val) -> Optional[datetime]:
-    if val is None: return None
-    if isinstance(val, datetime): return val if val.tzinfo else val.replace(tzinfo=TZ)
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val if val.tzinfo else val.replace(tzinfo=TZ)
     text = str(val).strip()
-    if not text: return None
+    if not text:
+        return None
     for fmt in ["%Y-%m-%d %H:%M:%S","%Y-%m-%d %H:%M","%d/%m/%Y %H:%M:%S","%d/%m/%Y %H:%M","%m/%d/%Y %H:%M:%S","%m/%d/%Y %H:%M","%Y/%m/%d %H:%M:%S","%Y/%m/%d %H:%M","%d-%m-%Y %H:%M:%S","%d-%m-%Y %H:%M"]:
-        try: return datetime.strptime(text, fmt).replace(tzinfo=TZ)
-        except ValueError: pass
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=TZ)
+        except ValueError:
+            pass
     try:
         dt = datetime.fromisoformat(text)
         return dt if dt.tzinfo else dt.replace(tzinfo=TZ)
@@ -161,10 +191,12 @@ def normalize_severity(val) -> str:
 
 def safe_get_owner(row: dict) -> str:
     value = row.get(COL_OWNER_GROUP)
-    if value not in (None, ""): return str(value).strip()
+    if value not in (None, ""):
+        return str(value).strip()
     for key in ["TRUEOWNERGROUP","TRUEOWNERGROUP ","TRUE OWNER GROUP","trueownnergroup","TRUEOWNNERGROUP"]:
         value = row.get(key)
-        if value not in (None, ""): return str(value).strip()
+        if value not in (None, ""):
+            return str(value).strip()
     try:
         values = list(row.values())
         if OWNER_GROUP_FALLBACK_INDEX < len(values):
@@ -175,9 +207,11 @@ def safe_get_owner(row: dict) -> str:
     return ""
 
 def normalize_requested_province(raw: str) -> Optional[str]:
-    if not raw: return None
+    if not raw:
+        return None
     text = str(raw).strip()
-    if text in PROVINCE_NAMES: return text
+    if text in PROVINCE_NAMES:
+        return text
     return CODE_TO_PROVINCE_ONLY.get(text.upper())
 
 def parse_owner_group(owner: str, region_val: str = "", province_col_val: str = "") -> Tuple[Optional[str], Optional[str]]:
@@ -185,57 +219,91 @@ def parse_owner_group(owner: str, region_val: str = "", province_col_val: str = 
     if pcol in PROVINCE_NAMES:
         region = str(region_val or "").strip().upper() or None
         return pcol, region
-    if not owner: return None, None
+    if not owner:
+        return None, None
     text = str(owner).strip().upper()
     region = str(region_val or "").strip().upper() or None
     m = OWNER_RE.search(text)
     if m:
-        rg = m.group(1).upper(); code = m.group(2).upper()
+        rg = m.group(1).upper()
+        code = m.group(2).upper()
         if code in CODE_TO_PROVINCE:
             province, _ = CODE_TO_PROVINCE[code]
             return province, rg
     for code, (province, rg) in CODE_TO_PROVINCE.items():
-        if code in text: return province, region or rg
+        if code in text:
+            return province, region or rg
     hits = []
     for hint, province in OWNER_HINT_TO_PROVINCE.items():
-        if hint in text: hits.append(province)
+        if hint in text:
+            hits.append(province)
     hits = list(dict.fromkeys(hits))
-    if len(hits) == 1: return hits[0], region
+    if len(hits) == 1:
+        return hits[0], region
     if region in REGION_TO_DEFAULTS and hits:
         region_hits = [p for p in hits if p in REGION_TO_DEFAULTS[region]]
         region_hits = list(dict.fromkeys(region_hits))
-        if len(region_hits) == 1: return region_hits[0], region
+        if len(region_hits) == 1:
+            return region_hits[0], region
     return None, region
 
 def get_max_insert_time(rows: List[dict]) -> Optional[datetime]:
     mx = None
     for row in rows:
         ins = parse_datetime(row.get(COL_INSERT_TIME, ""))
-        if ins and (mx is None or ins > mx): mx = ins
+        if ins and (mx is None or ins > mx):
+            mx = ins
     return mx
 
+def parse_over_sla(val) -> float:
+    try:
+        if val is None or str(val).strip() == "":
+            return 0.0
+        return float(str(val).strip())
+    except Exception:
+        return 0.0
+
+def sla_status(row: dict) -> str:
+    over = parse_over_sla(row.get(COL_OVER_SLA, 0))
+    return "OVER_SLA" if over > 0 else "IN_SLA"
+
 def filter_new_tickets(rows: List[dict], seen: Set[str], last_creation_time: Optional[datetime]):
-    result = []; seen_in_batch = set(); max_creation = last_creation_time
+    result = []
+    seen_in_batch = set()
+    max_creation = last_creation_time
     for row in rows:
         tid = str(row.get(COL_TICKET_ID, "")).strip()
-        if not tid or tid in seen or tid in seen_in_batch: continue
+        if not tid or tid in seen or tid in seen_in_batch:
+            continue
         sev = normalize_severity(row.get(COL_SEVERITY, ""))
-        if sev not in ALLOWED_SEVERITIES: continue
+        if sev not in ALLOWED_SEVERITIES:
+            continue
         owner = safe_get_owner(row)
         province, region = parse_owner_group(owner, row.get(COL_REGION, ""), row.get(COL_PROVINCE, ""))
-        if not province: continue
+        if not province:
+            continue
         created = parse_datetime(row.get(COL_CREATION, ""))
-        if created is None: continue
-        if last_creation_time is not None and created <= last_creation_time: continue
-        row["_ticket_id"] = tid; row["_province"] = province; row["_region"] = region or "-"
-        row["_created_dt"] = created; row["_severity_norm"] = sev; row["_owner_raw"] = owner
-        result.append(row); seen_in_batch.add(tid)
-        if max_creation is None or created > max_creation: max_creation = created
+        if created is None:
+            continue
+        if last_creation_time is not None and created <= last_creation_time:
+            continue
+        row["_ticket_id"] = tid
+        row["_province"] = province
+        row["_region"] = region or "-"
+        row["_created_dt"] = created
+        row["_severity_norm"] = sev
+        row["_owner_raw"] = owner
+        row["_sla_status"] = sla_status(row)
+        result.append(row)
+        seen_in_batch.add(tid)
+        if max_creation is None or created > max_creation:
+            max_creation = created
     return result, max_creation
 
 def group_by_province(tickets: List[dict]) -> Dict[str, List[dict]]:
     buckets = {p: [] for p in PROVINCE_NAMES}
-    for t in tickets: buckets[t["_province"]].append(t)
+    for t in tickets:
+        buckets[t["_province"]].append(t)
     return {p: v for p, v in buckets.items() if v}
 
 def severity_icon(sev: str) -> str:
@@ -248,98 +316,133 @@ def shorten(text: str, limit: int = 120) -> str:
     text = str(text or "").strip()
     return text if len(text) <= limit else text[:limit-3] + "..."
 
-def build_summary_message(province: str, region: str, tickets: List[dict]) -> str:
+def build_summary_message(province: str, region: str, tickets: List[dict], batch_insert_time: str) -> str:
     now = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
     total = len(tickets)
     sev_order = sorted(ALLOWED_SEVERITIES, key=lambda s: SEVERITY_PRIORITY.get(s, 999))
     counts = {sev: 0 for sev in sev_order}
-    for t in tickets: counts[t["_severity_norm"]] = counts.get(t["_severity_norm"], 0) + 1
+    sla_counts = {"IN_SLA": 0, "OVER_SLA": 0}
+    for t in tickets:
+        counts[t["_severity_norm"]] = counts.get(t["_severity_norm"], 0) + 1
+        sla_counts[t["_sla_status"]] = sla_counts.get(t["_sla_status"], 0) + 1
     summary_line = " | ".join([f"{sev}:{counts[sev]}" for sev in sev_order if counts[sev] > 0]) or "-"
-    sorted_tickets = sorted(tickets, key=lambda x: (SEVERITY_PRIORITY.get(x["_severity_norm"], 999), x["_created_dt"]))
     lines = [
-        "🔔 <b>แจ้งเตือน Ticket ใหม่</b>",
+        "🔔 <b>แจ้งเตือน Ticket รอบใหม่</b>",
         f"📍 จังหวัด: <b>{tg_escape(province)}</b> ({tg_escape(region)})",
-        f"⏰ เวลา: {tg_escape(now)}",
-        f"🎫 รวม: <b>{total}</b> รายการ",
-        f"📊 {tg_escape(summary_line)}",
-        "",
-        f"📌 <b>Top {min(TOP_TICKET_PREVIEW, len(sorted_tickets))} รายการแรก</b>",
+        f"⏰ ส่งเมื่อ: {tg_escape(now)}",
+        f"🕒 insert_time รอบนี้: <b>{tg_escape(batch_insert_time)}</b>",
+        f"🎫 จำนวนที่ส่ง: <b>{total}</b> รายการ",
+        f"📊 Severity: {tg_escape(summary_line)}",
+        f"📈 SLA: IN_SLA <b>{sla_counts['IN_SLA']}</b> | OVER_SLA <b>{sla_counts['OVER_SLA']}</b>",
     ]
-    for i, t in enumerate(sorted_tickets[:TOP_TICKET_PREVIEW], 1):
-        tid = tg_escape(str(t.get(COL_TICKET_ID, "-")).strip() or "-")
-        created = tg_escape(str(t.get(COL_CREATION, "-")).strip() or "-")
-        ci = tg_escape(shorten(t.get(COL_CINAME, "-"), 40))
-        subj = tg_escape(shorten(t.get(COL_SUBJECT, "-"), 70))
-        sev = t["_severity_norm"]; icon = severity_icon(sev)
-        lines.append(f"{i}. {icon} <b>{sev}</b> | <code>{tid}</code>")
-        lines.append(f"   🕒 {created}")
-        lines.append(f"   📍 {ci}")
-        lines.append(f"   📝 {subj}")
-    if len(sorted_tickets) > TOP_TICKET_PREVIEW:
-        lines += ["", f"… และอีก <b>{len(sorted_tickets)-TOP_TICKET_PREVIEW}</b> รายการ"]
+    return "\n".join(lines)[:4000]
+
+def build_ticket_message(t: dict, idx: int, total: int) -> str:
+    tid = tg_escape(str(t.get(COL_TICKET_ID, "-")).strip() or "-")
+    sev = t["_severity_norm"]
+    created = tg_escape(str(t.get(COL_CREATION, "-")).strip() or "-")
+    target = tg_escape(str(t.get(COL_TARGET_FINISH, "-")).strip() or "-")
+    ci = tg_escape(shorten(t.get(COL_CINAME, "-"), 60))
+    cat = tg_escape(shorten(t.get(COL_CATEGORIES, "-"), 60))
+    subj = tg_escape(shorten(t.get(COL_SUBJECT, "-"), 200))
+    sla = tg_escape(t["_sla_status"])
+    icon = severity_icon(sev)
+    lines = [
+        f"{icon} <b>{idx}/{total}</b> | <b>{sev}</b> | <code>{tid}</code>",
+        f"🕒 Create: {created}",
+        f"⏳ Target: {target}",
+        f"📈 SLA: <b>{sla}</b>",
+        f"📍 Site: {ci}",
+        f"🗂 {cat}",
+        f"📝 {subj}",
+    ]
     return "\n".join(lines)[:4000]
 
 def push_telegram(chat_id: str, text: str) -> bool:
     if not TELEGRAM_BOT_TOKEN:
-        log.error("TELEGRAM_BOT_TOKEN missing"); return False
+        log.error("TELEGRAM_BOT_TOKEN missing")
+        return False
     if not chat_id:
-        log.error("push skipped: empty chat id"); return False
+        log.error("push skipped: empty chat id")
+        return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": TELEGRAM_PARSE_MODE, "disable_web_page_preview": True}
     try:
         r = requests.post(url, json=payload, timeout=15)
         if r.status_code == 200:
-            log.info(f"telegram push ok → {str(chat_id)[:12]}..."); return True
-        log.error(f"telegram push failed {r.status_code} → {str(chat_id)[:12]}...: {r.text}"); return False
+            return True
+        log.error(f"telegram push failed {r.status_code} → {str(chat_id)[:12]}...: {r.text}")
+        return False
     except Exception as e:
-        log.error(f"telegram push exception → {str(chat_id)[:12]}...: {e}"); return False
+        log.error(f"telegram push exception → {str(chat_id)[:12]}...: {e}")
+        return False
 
 def run_job() -> dict:
-    targets = _load_targets(); seen = load_seen(); last_insert_time, last_creation_time = load_last_batch_state()
-    rows = fetch_tickets(); max_insert_time = get_max_insert_time(rows)
+    targets = _load_targets()
+    seen = load_seen()
+    last_insert_time, last_creation_time = load_last_batch_state()
+    rows = fetch_tickets()
+    max_insert_time = get_max_insert_time(rows)
     if max_insert_time is None:
         return {"ok": False, "error": f"cannot find valid {COL_INSERT_TIME}"}
     if last_insert_time and max_insert_time <= last_insert_time:
-        return {"ok": True, "mode": "insert_then_creation_summary_telegram", "new_batch": False, "new": 0, "message": "insert_time not changed", "last_insert_time": last_insert_time.isoformat(), "current_max_insert_time": max_insert_time.isoformat(), "last_creation_time": last_creation_time.isoformat() if last_creation_time else None, "pushed": {}}
+        return {"ok": True, "mode": "insert_then_creation_summary_plus_each_telegram", "new_batch": False, "new": 0, "message": "insert_time not changed", "last_insert_time": last_insert_time.isoformat(), "current_max_insert_time": max_insert_time.isoformat(), "last_creation_time": last_creation_time.isoformat() if last_creation_time else None, "pushed": {}}
     new_tickets, max_creation_time = filter_new_tickets(rows, seen, last_creation_time)
-    detail = {}; pushed_ids = []
+    detail = {}
+    pushed_ids = []
+    batch_insert_text = max_insert_time.strftime("%Y-%m-%d %H:%M:%S")
     if new_tickets:
         by_province = group_by_province(new_tickets)
         for province, lst in by_province.items():
             target = targets.get(province)
             if not target:
-                detail[province] = {"count": len(lst), "pushed": False, "reason": "no target configured"}; continue
+                detail[province] = {"count": len(lst), "pushed": False, "reason": "no target configured"}
+                continue
             region = lst[0]["_region"]
-            ok = push_telegram(target, build_summary_message(province, region, lst))
-            detail[province] = {"count": len(lst), "pushed": ok}
-            if ok: pushed_ids.extend([t["_ticket_id"] for t in lst])
-        if pushed_ids: save_seen(pushed_ids)
+            ok_summary = push_telegram(target, build_summary_message(province, region, lst, batch_insert_text))
+            ok_all = ok_summary
+            sorted_tickets = sorted(lst, key=lambda x: (SEVERITY_PRIORITY.get(x["_severity_norm"], 999), x["_created_dt"]))
+            for idx, t in enumerate(sorted_tickets, 1):
+                ok_one = push_telegram(target, build_ticket_message(t, idx, len(sorted_tickets)))
+                ok_all = ok_all and ok_one
+            detail[province] = {"count": len(lst), "pushed": ok_all}
+            if ok_all:
+                pushed_ids.extend([t["_ticket_id"] for t in lst])
+        if pushed_ids:
+            save_seen(pushed_ids)
     save_last_batch_state(max_insert_time, max_creation_time if max_creation_time else last_creation_time)
     final_last_creation = max_creation_time if max_creation_time else last_creation_time
-    return {"ok": True, "mode": "insert_then_creation_summary_telegram", "new_batch": True, "new": len(new_tickets), "pushed_count": len(pushed_ids), "last_insert_time": max_insert_time.isoformat(), "last_creation_time": final_last_creation.isoformat() if final_last_creation else None, "allowed_severities": sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)), "detail": detail}
+    return {"ok": True, "mode": "insert_then_creation_summary_plus_each_telegram", "new_batch": True, "new": len(new_tickets), "pushed_count": len(pushed_ids), "last_insert_time": max_insert_time.isoformat(), "last_creation_time": final_last_creation.isoformat() if final_last_creation else None, "allowed_severities": sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)), "detail": detail}
 
 @app.route("/")
 def home():
-    return jsonify({"service":"Telegram NOC Ticket Notifier","status":"running","mode":"insert_then_creation_summary_telegram","time":datetime.now(TZ).isoformat(),"summary_mode":True,"top_ticket_preview":TOP_TICKET_PREVIEW})
+    return jsonify({"service":"Telegram NOC Ticket Notifier","status":"running","mode":"insert_then_creation_summary_plus_each_telegram","time":datetime.now(TZ).isoformat(),"summary_mode":True,"each_ticket_mode":True})
 
 @app.route("/health")
 def health():
-    targets = _load_targets(); seen = load_seen(); last_insert_time, last_creation_time = load_last_batch_state()
-    return jsonify({"ok":True,"seen_count":len(seen),"has_telegram_token":bool(TELEGRAM_BOT_TOKEN),"has_sheet_creds":bool(GOOGLE_CREDS_JSON),"sheet_id_set":bool(SHEET_ID),"sheet_name":SHEET_NAME,"insert_time_column":COL_INSERT_TIME,"creation_column":COL_CREATION,"owner_column":COL_OWNER_GROUP,"region_column":COL_REGION,"province_column":COL_PROVINCE,"owner_group_fallback_index":OWNER_GROUP_FALLBACK_INDEX,"allowed_severities":sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)),"targets_configured":len(targets),"targets_missing":[p for p in PROVINCE_NAMES if p not in targets],"last_insert_time":last_insert_time.isoformat() if last_insert_time else None,"last_creation_time":last_creation_time.isoformat() if last_creation_time else None,"summary_mode":True,"top_ticket_preview":TOP_TICKET_PREVIEW})
+    targets = _load_targets()
+    seen = load_seen()
+    last_insert_time, last_creation_time = load_last_batch_state()
+    return jsonify({"ok":True,"seen_count":len(seen),"has_telegram_token":bool(TELEGRAM_BOT_TOKEN),"has_sheet_creds":bool(GOOGLE_CREDS_JSON),"sheet_id_set":bool(SHEET_ID),"sheet_name":SHEET_NAME,"insert_time_column":COL_INSERT_TIME,"creation_column":COL_CREATION,"owner_column":COL_OWNER_GROUP,"region_column":COL_REGION,"province_column":COL_PROVINCE,"owner_group_fallback_index":OWNER_GROUP_FALLBACK_INDEX,"allowed_severities":sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)),"targets_configured":len(targets),"targets_missing":[p for p in PROVINCE_NAMES if p not in targets],"last_insert_time":last_insert_time.isoformat() if last_insert_time else None,"last_creation_time":last_creation_time.isoformat() if last_creation_time else None,"summary_mode":True,"each_ticket_mode":True})
 
 @app.route("/run-by-insert-time", methods=["GET","POST"])
 def run_by_insert_time():
-    if not _authorized(): return jsonify({"ok":False,"error":"unauthorized"}), 401
+    if not _authorized():
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
     return jsonify(run_job())
 
 @app.route("/test-push", methods=["GET"])
 def test_push():
-    if not _authorized(): return jsonify({"ok":False,"error":"unauthorized"}), 401
+    if not _authorized():
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
     targets = _load_targets()
-    only_raw = request.args.get("province", "").strip(); requested = only_raw
+    only_raw = request.args.get("province", "").strip()
+    requested = only_raw
     normalized = normalize_requested_province(only_raw) if only_raw else None
-    if normalized: targets = {normalized: targets[normalized]} if normalized in targets else {}
-    elif only_raw: targets = {}
+    if normalized:
+        targets = {normalized: targets[normalized]} if normalized in targets else {}
+    elif only_raw:
+        targets = {}
     if not targets:
         return jsonify({"ok":False,"error":"no targets","requested":requested,"normalized":normalized,"available_targets":sorted(list(_load_targets().keys()))}), 400
     result = {}
@@ -349,7 +452,8 @@ def test_push():
 
 @app.route("/debug-last-rows", methods=["GET"])
 def debug_last_rows():
-    if not _authorized(): return jsonify({"ok":False,"error":"unauthorized"}), 401
+    if not _authorized():
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
     limit = int(request.args.get("limit", "5"))
     rows = fetch_tickets(); rows = rows[-limit:] if limit > 0 else rows
     out = []
@@ -357,12 +461,13 @@ def debug_last_rows():
         owner = safe_get_owner(row)
         province, region = parse_owner_group(owner, row.get(COL_REGION, ""), row.get(COL_PROVINCE, ""))
         sev = normalize_severity(row.get(COL_SEVERITY, ""))
-        out.append({"TICKETID":row.get(COL_TICKET_ID,""),"CREATIONDATE":row.get(COL_CREATION,""),"insert_time":row.get(COL_INSERT_TIME,""),"SEVERITY":row.get(COL_SEVERITY,""),"severity_normalized":sev,"severity_allowed":sev in ALLOWED_SEVERITIES,"TRUEOWNERGROUP":owner,"Region":row.get(COL_REGION,""),"Province":row.get(COL_PROVINCE,""),"creation_parsed":parse_datetime(row.get(COL_CREATION,"")).isoformat() if parse_datetime(row.get(COL_CREATION,"")) else None,"insert_parsed":parse_datetime(row.get(COL_INSERT_TIME,"")).isoformat() if parse_datetime(row.get(COL_INSERT_TIME,"")) else None,"parsed_province":province,"parsed_region":region})
+        out.append({"TICKETID":row.get(COL_TICKET_ID,""),"CREATIONDATE":row.get(COL_CREATION,""),"insert_time":row.get(COL_INSERT_TIME,""),"SEVERITY":row.get(COL_SEVERITY,""),"severity_normalized":sev,"severity_allowed":sev in ALLOWED_SEVERITIES,"TRUEOWNERGROUP":owner,"Region":row.get(COL_REGION,""),"Province":row.get(COL_PROVINCE,""),"SLA_STATUS":sla_status(row),"creation_parsed":parse_datetime(row.get(COL_CREATION,"")).isoformat() if parse_datetime(row.get(COL_CREATION,"")) else None,"insert_parsed":parse_datetime(row.get(COL_INSERT_TIME,"")).isoformat() if parse_datetime(row.get(COL_INSERT_TIME,"")) else None,"parsed_province":province,"parsed_region":region})
     return jsonify({"ok":True,"count":len(out),"rows":out})
 
 @app.route("/reset-state", methods=["GET","POST"])
 def reset_state():
-    if not _authorized(): return jsonify({"ok":False,"error":"unauthorized"}), 401
+    if not _authorized():
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
     try:
         if os.path.exists(STATE_FILE): os.remove(STATE_FILE)
         if os.path.exists(LAST_BATCH_FILE): os.remove(LAST_BATCH_FILE)
