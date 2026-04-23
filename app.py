@@ -53,23 +53,35 @@ STATE_FILE = os.path.join(STATE_DIR, "seen_tickets.json")
 LAST_BATCH_FILE = os.path.join(STATE_DIR, "last_batch_state.json")
 
 # ---------- 15 PROVINCE CONFIG ----------
+# รองรับทั้ง code เดิมและ alias ที่เจอในข้อมูลจริง
 CODE_TO_PROVINCE: Dict[str, Tuple[str, str]] = {
+    # NOR1
+    "CMI": ("เชียงใหม่", "NOR1"),
     "CMI1": ("เชียงใหม่", "NOR1"),
     "CMI2": ("เชียงใหม่", "NOR1"),
-    "CRI":  ("เชียงราย", "NOR1"),
-    "LPG":  ("ลำปาง", "NOR1"),
-    "LPN":  ("ลำพูน", "NOR1"),
-    "MHS":  ("แม่ฮ่องสอน", "NOR1"),
-    "NAN":  ("น่าน", "NOR1"),
-    "PHE":  ("แพร่", "NOR1"),
-    "PYO":  ("พะเยา", "NOR1"),
-    "KPP":  ("กำแพงเพชร", "NOR2"),
-    "PCB":  ("เพชรบูรณ์", "NOR2"),
-    "PCT":  ("พิจิตร", "NOR2"),
-    "PSN":  ("พิษณุโลก", "NOR2"),
-    "SKT":  ("สุโขทัย", "NOR2"),
-    "TAK":  ("ตาก", "NOR2"),
-    "UTR":  ("อุตรดิตถ์", "NOR2"),
+    "CRI": ("เชียงราย", "NOR1"),
+    "LPG": ("ลำปาง", "NOR1"),
+    "LPN": ("ลำพูน", "NOR1"),
+    "MHS": ("แม่ฮ่องสอน", "NOR1"),
+    "NAN": ("น่าน", "NOR1"),
+    "PHE": ("แพร่", "NOR1"),
+    "PRE": ("แพร่", "NOR1"),
+    "PYO": ("พะเยา", "NOR1"),
+    "PHY": ("พะเยา", "NOR1"),
+
+    # NOR2
+    "KPP": ("กำแพงเพชร", "NOR2"),
+    "PCB": ("เพชรบูรณ์", "NOR2"),
+    "PBN": ("เพชรบูรณ์", "NOR2"),
+    "PCT": ("พิจิตร", "NOR2"),
+    "PSN": ("พิษณุโลก", "NOR2"),
+    "PHS": ("พิษณุโลก", "NOR2"),
+    "PLK": ("พิษณุโลก", "NOR2"),
+    "SKT": ("สุโขทัย", "NOR2"),
+    "STI": ("สุโขทัย", "NOR2"),
+    "TAK": ("ตาก", "NOR2"),
+    "UTR": ("อุตรดิตถ์", "NOR2"),
+    "UTT": ("อุตรดิตถ์", "NOR2"),
 }
 
 PROVINCE_NAMES_NOR1 = [
@@ -82,53 +94,88 @@ PROVINCE_NAMES_NOR2 = [
 ]
 PROVINCE_NAMES = PROVINCE_NAMES_NOR1 + PROVINCE_NAMES_NOR2
 
-OWNER_RE = re.compile(r"TRUE-TH-BBT-(NOR[12])-([A-Z]+[0-9]*)-", re.IGNORECASE)
-
-
-PROVINCE_ALIASES: Dict[str, str] = {
+# รองรับทั้ง code และชื่อจังหวัดเวลา test-push
+REQUESTED_TO_PROVINCE: Dict[str, str] = {
+    # NOR1
     "CMI": "เชียงใหม่",
     "CMI1": "เชียงใหม่",
     "CMI2": "เชียงใหม่",
     "เชียงใหม่": "เชียงใหม่",
+    "CHIANGMAI": "เชียงใหม่",
+
     "CRI": "เชียงราย",
     "เชียงราย": "เชียงราย",
+    "CHIANGRAI": "เชียงราย",
+
     "LPG": "ลำปาง",
     "ลำปาง": "ลำปาง",
+    "LAMPANG": "ลำปาง",
+
     "LPN": "ลำพูน",
     "ลำพูน": "ลำพูน",
+    "LAMPHUN": "ลำพูน",
+
     "MHS": "แม่ฮ่องสอน",
     "แม่ฮ่องสอน": "แม่ฮ่องสอน",
+    "MAEHONGSON": "แม่ฮ่องสอน",
+
     "NAN": "น่าน",
     "น่าน": "น่าน",
+
     "PHE": "แพร่",
+    "PRE": "แพร่",
     "แพร่": "แพร่",
+    "PHRAE": "แพร่",
+
     "PYO": "พะเยา",
+    "PHY": "พะเยา",
     "พะเยา": "พะเยา",
+    "PHAYAO": "พะเยา",
+
+    # NOR2
     "KPP": "กำแพงเพชร",
     "กำแพงเพชร": "กำแพงเพชร",
+    "KAMPHAENGPHET": "กำแพงเพชร",
+
     "PCB": "เพชรบูรณ์",
+    "PBN": "เพชรบูรณ์",
     "เพชรบูรณ์": "เพชรบูรณ์",
+    "PHETCHABUN": "เพชรบูรณ์",
+
     "PCT": "พิจิตร",
     "พิจิตร": "พิจิตร",
+    "PHICHIT": "พิจิตร",
+
     "PSN": "พิษณุโลก",
+    "PHS": "พิษณุโลก",
+    "PLK": "พิษณุโลก",
     "พิษณุโลก": "พิษณุโลก",
+    "PHITSANULOK": "พิษณุโลก",
+
     "SKT": "สุโขทัย",
+    "STI": "สุโขทัย",
     "สุโขทัย": "สุโขทัย",
+    "SUKHOTHAI": "สุโขทัย",
+
     "TAK": "ตาก",
     "ตาก": "ตาก",
+
     "UTR": "อุตรดิตถ์",
+    "UTT": "อุตรดิตถ์",
     "อุตรดิตถ์": "อุตรดิตถ์",
+    "UTTARADIT": "อุตรดิตถ์",
 }
 
-
-def normalize_province_arg(value: str) -> str:
-    raw = (value or "").strip()
-    if not raw:
-        return ""
-    return PROVINCE_ALIASES.get(raw.upper(), PROVINCE_ALIASES.get(raw, raw))
+OWNER_RE = re.compile(r"TRUE-TH-BBT-(NOR[12])-([A-Z0-9]+)-", re.IGNORECASE)
 
 
 # ---------- CONFIG HELPERS ----------
+def _require_secret() -> Optional[tuple]:
+    if request.args.get("secret", "") != CRON_SECRET:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return None
+
+
 def _load_line_targets() -> Dict[str, str]:
     raw = os.getenv("LINE_TARGETS_JSON", "").strip()
     if raw:
@@ -161,6 +208,13 @@ def _load_line_targets() -> Dict[str, str]:
         if val:
             out[province] = val
     return out
+
+
+def normalize_requested_province(raw: str) -> Optional[str]:
+    if not raw:
+        return None
+    key = str(raw).strip().upper().replace(" ", "")
+    return REQUESTED_TO_PROVINCE.get(key) or REQUESTED_TO_PROVINCE.get(str(raw).strip())
 
 
 # ---------- STATE ----------
@@ -258,13 +312,19 @@ def fetch_tickets() -> List[dict]:
 def parse_owner_group(val: str) -> Tuple[Optional[str], Optional[str]]:
     if not val:
         return None, None
-    m = OWNER_RE.search(str(val))
-    if not m:
-        return None, None
-    code = m.group(2).upper()
-    if code not in CODE_TO_PROVINCE:
-        return None, None
-    return CODE_TO_PROVINCE[code]
+    text = str(val).strip().upper()
+    m = OWNER_RE.search(text)
+    if m:
+        code = m.group(2).upper()
+        if code in CODE_TO_PROVINCE:
+            return CODE_TO_PROVINCE[code]
+
+    # fallback: scan code alias เผื่อ format แปลก
+    for code, province_region in sorted(CODE_TO_PROVINCE.items(), key=lambda x: len(x[0]), reverse=True):
+        if f"-{code}-" in text or text.endswith(f"-{code}") or text == code:
+            return province_region
+
+    return None, None
 
 
 def parse_datetime(val) -> Optional[datetime]:
@@ -565,6 +625,7 @@ def health():
         "sheet_name": SHEET_NAME,
         "insert_time_column": COL_INSERT_TIME,
         "creation_column": COL_CREATION,
+        "owner_group_column": COL_OWNER_GROUP,
         "targets_configured": len(targets),
         "targets_missing": [p for p in PROVINCE_NAMES if p not in targets],
         "last_insert_time": last_insert_time.isoformat() if last_insert_time else None,
@@ -574,22 +635,25 @@ def health():
 
 @app.route("/run", methods=["GET", "POST"])
 def run_endpoint():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
     return jsonify(run_insert_creation_job())
 
 
 @app.route("/run-by-insert-time", methods=["GET", "POST"])
 def run_by_insert_time():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
     return jsonify(run_insert_creation_job())
 
 
 @app.route("/debug-state", methods=["GET"])
 def debug_state():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
     last_insert_time, last_creation_time = load_last_batch_state()
     return jsonify({
         "ok": True,
@@ -599,12 +663,11 @@ def debug_state():
     })
 
 
-
-
 @app.route("/debug-secret", methods=["GET"])
 def debug_secret():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
     cron = os.getenv("CRON_SECRET", "")
     return jsonify({
         "cron_secret_loaded": cron,
@@ -617,8 +680,9 @@ def debug_secret():
 
 @app.route("/debug-env", methods=["GET"])
 def debug_env():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
     safe_env = {}
     for k, v in os.environ.items():
         if any(word in k for word in ["TOKEN", "SECRET", "KEY", "CREDS"]):
@@ -627,47 +691,90 @@ def debug_env():
             safe_env[k] = v
     return jsonify(safe_env)
 
+
+@app.route("/debug-last-rows", methods=["GET"])
+def debug_last_rows():
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
+
+    limit = max(1, min(int(request.args.get("limit", "5")), 20))
+    try:
+        rows = fetch_tickets()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    preview = []
+    for row in rows[-limit:]:
+        owner_raw = row.get(COL_OWNER_GROUP, "")
+        province, region = parse_owner_group(owner_raw)
+        created = parse_datetime(row.get(COL_CREATION, ""))
+        inserted = parse_datetime(row.get(COL_INSERT_TIME, ""))
+        preview.append({
+            "TICKETID": row.get(COL_TICKET_ID, ""),
+            "CREATIONDATE": row.get(COL_CREATION, ""),
+            "insert_time": row.get(COL_INSERT_TIME, ""),
+            "TRUEOWNERGROUP": owner_raw,
+            "parsed_province": province,
+            "parsed_region": region,
+            "creation_parsed": created.isoformat() if created else None,
+            "insert_parsed": inserted.isoformat() if inserted else None,
+        })
+
+    return jsonify({
+        "ok": True,
+        "count": len(preview),
+        "rows": preview,
+    })
+
+
 @app.route("/test-push", methods=["GET"])
 def test_push():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
 
     targets = _load_line_targets()
-    requested = request.args.get("province", "").strip()
-    if requested:
-        normalized = normalize_province_arg(requested)
-        targets = {normalized: targets[normalized]} if normalized in targets else {}
+    only = request.args.get("province", "").strip()
+    normalized = None
+
+    if only:
+        normalized = normalize_requested_province(only)
+        if normalized:
+            targets = {normalized: targets[normalized]} if normalized in targets else {}
+        else:
+            targets = {}
 
     if not targets:
         return jsonify({
             "ok": False,
             "error": "no targets",
-            "requested": requested,
-            "normalized": normalize_province_arg(requested) if requested else "",
+            "requested": only,
+            "normalized": normalized,
             "available_targets": sorted(list(_load_line_targets().keys())),
         }), 400
 
     result = {}
-    now_str = datetime.now(TZ).strftime('%H:%M:%S')
     for province, tid in targets.items():
         ok = push_line(tid, [{
             "type": "text",
-            "text": f"✅ ทดสอบ LINE NOC Bot\nห้อง: {province}\nเวลา: {now_str}",
+            "text": f"✅ ทดสอบ LINE NOC Bot\nห้อง: {province}\nเวลา: {datetime.now(TZ).strftime('%H:%M:%S')}",
         }])
         result[province] = ok
 
     return jsonify({
         "ok": True,
-        "requested": requested,
-        "normalized": normalize_province_arg(requested) if requested else "",
+        "requested": only,
+        "normalized": normalized,
         "result": result,
     })
 
 
 @app.route("/reset-seen", methods=["GET", "POST"])
 def reset_seen():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
     try:
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
@@ -678,8 +785,9 @@ def reset_seen():
 
 @app.route("/reset-state", methods=["GET", "POST"])
 def reset_state():
-    if request.args.get("secret", "") != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    unauthorized = _require_secret()
+    if unauthorized:
+        return unauthorized
     try:
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
