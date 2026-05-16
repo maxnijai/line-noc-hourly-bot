@@ -1,4 +1,3 @@
-
 """
 Telegram NOC Ticket Notifier - final hourly window logic
 
@@ -503,31 +502,10 @@ def home():
         "each_ticket_mode": True,
     })
 
+# --- แก้ไขจุดเดียว: /health return ทันที ไม่เรียก function อื่น ---
 @app.route("/health")
 def health():
-    targets = _load_targets()
-    seen = load_seen()
-    last_insert_time = load_last_batch_state()
-    return jsonify({
-        "ok": True,
-        "seen_count": len(seen),
-        "has_telegram_token": bool(TELEGRAM_BOT_TOKEN),
-        "has_sheet_creds": bool(GOOGLE_CREDS_JSON),
-        "sheet_id_set": bool(SHEET_ID),
-        "sheet_name": SHEET_NAME,
-        "insert_time_column": COL_INSERT_TIME,
-        "creation_column": COL_CREATION,
-        "owner_column": COL_OWNER_GROUP,
-        "region_column": COL_REGION,
-        "province_column": COL_PROVINCE,
-        "owner_group_fallback_index": OWNER_GROUP_FALLBACK_INDEX,
-        "allowed_severities": sorted(list(ALLOWED_SEVERITIES), key=lambda s: SEVERITY_PRIORITY.get(s, 999)),
-        "targets_configured": len(targets),
-        "targets_missing": [p for p in PROVINCE_NAMES if p not in targets],
-        "last_insert_time": last_insert_time.isoformat() if last_insert_time else None,
-        "summary_mode": True,
-        "each_ticket_mode": True,
-    })
+    return jsonify({"ok": True}), 200
 
 @app.route("/run-by-insert-time", methods=["GET", "POST"])
 def run_by_insert_time():
